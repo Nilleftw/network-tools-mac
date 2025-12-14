@@ -1,0 +1,31 @@
+[2025-12-14 13:26:13] CMD: ping -c 3 1.1.1.1
+RESULT: PING 1.1.1.1 (1.1.1.1): 56 data bytes
+64 bytes from 1.1.1.1: icmp_seq=0 ttl=52 time=9.437 ms
+64 bytes from 1.1.1.1: icmp_seq=1 ttl=52 time=8.743 ms
+64 bytes from 1.1.1.1: icmp_seq=2 ttl=52 time=10.081 ms
+
+--- 1.1.1.1 ping statistics ---
+3 packets transmitted, 3 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 8.743/9.420/10.081/0.546 ms
+
+[2025-12-14 13:26:21] CMD: nslookup -type=mx google.se
+RESULT: Server:		192.168.1.40
+Address:	192.168.1.40#53
+Non-authoritative answer:
+google.se	mail exchanger = 0 smtp.google.com.
+Authoritative answers can be found from:
+
+[2025-12-14 13:26:35] CMD: nc -u -z -w 2 192.168.1.40 53
+RESULT: Success - Packet Accepted (Open)
+
+[2025-12-14 13:31:24] CMD: curl -so /dev/null -w %{time_connect} --connect-timeout 3 telnet://aftonbladet.se:443
+RESULT: Success - Latency: 12.69 ms
+
+[2025-12-14 17:01:44] CMD: dig +noall +answer +stats -t A aftonbladet.se
+RESULT: aftonbladet.se.		300	IN	A	35.71.185.87
+aftonbladet.se.		300	IN	A	52.223.48.227
+;; Query time: 35 msec
+;; SERVER: 192.168.1.40#53(192.168.1.40)
+;; WHEN: Sun Dec 14 17:01:44 CET 2025
+;; MSG SIZE  rcvd: 75
+
