@@ -1,24 +1,47 @@
 #!/bin/bash
 
-# --- HELPER FUNCTIONS ---
+# --- CONFIGURATION ---
+LOG_FILE="network_report.log"
+LOGGING=false
+
+# --- ARGUMENT PARSING ---
+while getopts "l" opt; do
+  case $opt in
+    l)
+      LOGGING=true
+      echo "📝 Logging enabled. Saving to: $LOG_FILE"
+      sleep 1
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# --- LOGGING FUNCTION ---
+log_transaction() {
+    local cmd="$1"
+    local output="$2"
+    
+    if [ "$LOGGING" = true ]; then
+        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "[$timestamp] CMD: $cmd" >> "$LOG_FILE"
+        echo "RESULT: $output" >> "$LOG_FILE"
+        echo "" >> "$LOG_FILE"
+    fi
+}
 
 print_line() {
     echo "----------------------------------------"
 }
 
-# validate_ip: Checks if a specific string is a valid IPv4 address (0-255)
+# --- VALIDATION FUNCTIONS ---
 validate_ip() {
     local ip=$1
     local stat=1
-
-    # Check format X.X.X.X
     if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        OIFS=$IFS
-        IFS='.'
-        ip_parts=($ip)
-        IFS=$OIFS
-        
-        # Check each octet is <= 255
+        OIFS=$IFS; IFS='.'; ip_parts=($ip); IFS=$OIFS
         if [[ ${ip_parts[0]} -le 255 && ${ip_parts[1]} -le 255 && \
               ${ip_parts[2]} -le 255 && ${ip_parts[3]} -le 255 ]]; then
             stat=0
@@ -27,39 +50,59 @@ validate_ip() {
     return $stat
 }
 
-# validate_target: 
-# 1. Checks for empty/spaces/invalid chars.
-# 2. If it looks like an IP, validates the octets.
 validate_target() {
     local input="$1"
-    
-    # 1. Basic sanity checks (Empty, Spaces)
-    if [[ -z "$input" ]]; then
-        echo "❌ Error: Input cannot be empty."
-        return 1
-    fi
-    if [[ "$input" =~ \  ]]; then
-        echo "❌ Error: Input cannot contain spaces."
-        return 1
-    fi
-
-    # 2. Check for illegal characters (security)
-    if [[ ! "$input" =~ ^[a-zA-Z0-9.:-]+$ ]]; then
-        echo "❌ Error: Invalid characters found."
-        return 1
-    fi
-
-    # 3. IP Logic Check
-    # If the input contains ONLY numbers and dots, we assume it's an IP and strict check it.
+    if [[ -z "$input" ]]; then echo "❌ Error: Input cannot be empty."; return 1; fi
+    if [[ "$input" =~ \  ]]; then echo "❌ Error: Input cannot contain spaces."; return 1; fi
+    if [[ ! "$input" =~ ^[a-zA-Z0-9.:-]+$ ]]; then echo "❌ Error: Invalid characters found."; return 1; fi
     if [[ "$input" =~ ^[0-9.]+$ ]]; then
         if ! validate_ip "$input"; then
-            echo "❌ Error: '$input' is not a valid IPv4 address (Octets must be 0-255)."
-            return 1
+            echo "❌ Error: '$input' is not a valid IPv4 address."; return 1
         fi
     fi
-
-    # If it's a hostname (contains letters), we pass it through (assuming basic regex passed)
     return 0
+}
+
+# --- PORT TESTING FUNCTIONS ---
+
+check_tcp() {
+    local target=$1
+    local port=$2
+    
+    echo -n "👉 Attempting TCP... "
+    local cmd_log="curl -so /dev/null -w %{time_connect} --connect-timeout 3 telnet://$target:$port"
+    
+    local result
+    result=$(echo "QUIT" | curl -so /dev/null -w "%{time_connect}" --connect-timeout 3 "telnet://$target:$port")
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ]; then
+        ms=$(echo "$result" | awk '{print $1 * 1000}')
+        ms_formatted=$(printf "%.2f" $ms)
+        echo "✅ SUCCESS! (${ms_formatted} ms)"
+        log_transaction "$cmd_log" "Success - Latency: ${ms_formatted} ms"
+        return 0
+    else
+        echo "❌ Failed."
+        log_transaction "$cmd_log" "Failed - Connection Refused or Timeout"
+        return 1
+    fi
+}
+
+check_udp() {
+    local target=$1
+    local port=$2
+    echo -n "👉 Attempting UDP... "
+    local cmd_log="nc -u -z -w 2 $target $port"
+    if nc -u -z -w 2 "$target" "$port" 2>&1 > /dev/null; then
+        echo "✅ SUCCESS!"
+        log_transaction "$cmd_log" "Success - Packet Accepted (Open)"
+        return 0
+    else
+        echo "❌ Failed."
+        log_transaction "$cmd_log" "Failed - Unreachable or Closed"
+        return 1
+    fi
 }
 
 # --- MAIN LOOP ---
@@ -68,10 +111,11 @@ while true; do
     echo ""
     print_line
     echo "   NETWORK DIAGNOSTIC TOOL"
+    if [ "$LOGGING" = true ]; then echo "   (Logs active)"; fi
     print_line
     echo "1. Ping Test"
-    echo "2. DNS Lookup (nslookup)"
-    echo "3. TCP Port Test"
+    echo "2. DNS Lookup (dig)"
+    echo "3. Port Test (UDP/TCP)"
     echo "4. Exit"
     echo ""
     
@@ -83,56 +127,78 @@ while true; do
             # --- PING TEST ---
             read -p "Enter Host or IP to ping: " target
             if ! validate_target "$target"; then continue; fi
-
             read -p "Enter packet count (default 3): " count
             count=${count:-3} 
-
-            if [[ ! "$count" =~ ^[0-9]+$ ]]; then
-                 echo "❌ Error: Packet count must be a number."
-                 continue
-            fi
-
-            echo "Running ping on $target ($count packets)..."
+            if [[ ! "$count" =~ ^[0-9]+$ ]]; then echo "❌ Error: Packet count must be a number."; continue; fi
+            
+            cmd_log="ping -c $count $target"
+            echo "Running: $cmd_log"
             print_line
-            ping -c "$count" "$target"
+            output=$(ping -c "$count" "$target" 2>&1)
+            echo "$output"
+            log_transaction "$cmd_log" "$output"
             ;;
             
         2)
-            # --- NSLOOKUP TEST ---
+            # --- DNS LOOKUP (DIG) ---
             read -p "Enter Hostname to resolve: " target
             if ! validate_target "$target"; then continue; fi
-
             echo "Common types: A (IP), MX (Mail), TXT (Text), CNAME (Alias), NS (Nameserver)"
             read -p "Enter Record Type [default: A]: " rtype
             rtype=${rtype:-A}
-
-            if [[ ! "$rtype" =~ ^[a-zA-Z]+$ ]]; then
-                echo "❌ Error: Invalid record type."
-                continue
-            fi
-
-            echo "Resolving $rtype records for $target..."
+            if [[ ! "$rtype" =~ ^[a-zA-Z]+$ ]]; then echo "❌ Error: Invalid record type."; continue; fi
+            
+            # Using 'dig' with options:
+            # +noall +answer : Hide header garbage, show answers
+            # +stats : Show the footer with "Query time"
+            cmd_log="dig +noall +answer +stats -t $rtype $target"
+            echo "Resolving $rtype for $target..."
             print_line
-            nslookup -type="$rtype" "$target"
+            
+            # Capture output
+            raw_output=$(dig +noall +answer +stats -t "$rtype" "$target" 2>&1)
+            
+            # Extract just the "Query time" line for display
+            query_time=$(echo "$raw_output" | grep "Query time" | sed 's/;; //')
+            
+            # Extract just the answer lines (lines that don't start with ;)
+            answers=$(echo "$raw_output" | grep -v "^;")
+
+            if [[ -z "$answers" ]]; then
+                echo "❌ No $rtype records found or lookup failed."
+                echo "$query_time"
+            else
+                echo "$answers"
+                echo ""
+                echo "⏱️  $query_time"
+            fi
+            
+            # Log the full clean output
+            log_transaction "$cmd_log" "$raw_output"
             ;;
             
         3)
-            # --- TCP PORT TEST ---
+            # --- PORT TEST UDP/TCP ---
             read -p "Enter Host or IP: " target
             if ! validate_target "$target"; then continue; fi
+            read -p "Enter Port: " port
+            if [[ ! "$port" =~ ^[0-9]+$ ]]; then echo "❌ Error: Port must be a number."; continue; fi
             
-            read -p "Enter Port (e.g., 80, 443): " port
-            if [[ ! "$port" =~ ^[0-9]+$ ]]; then
-                echo "❌ Error: Port must be a number."
-                continue
-            fi
-            
-            echo "Testing connection to $target on port $port..."
-            if nc -z -w 5 "$target" "$port" 2>&1 > /dev/null; then
-                echo "✅ SUCCESS: Port $port on $target is OPEN."
-            else
-                echo "❌ FAILURE: Port $port on $target is CLOSED or FILTERED."
-            fi
+            echo "Choose Protocol: [Enter]=Auto, [tcp], [udp]"
+            read -p "Selection: " proto
+            proto=${proto:-both}
+            proto=$(echo "$proto" | tr '[:upper:]' '[:lower:]')
+
+            echo "Testing $target:$port..."
+            print_line
+
+            case $proto in
+                tcp) check_tcp "$target" "$port" ;;
+                udp) check_udp "$target" "$port" ;;
+                both|auto)
+                    if check_udp "$target" "$port"; then :; else check_tcp "$target" "$port"; fi ;;
+                *) echo "❌ Error: Invalid protocol.";;
+            esac
             ;;
             
         4)
