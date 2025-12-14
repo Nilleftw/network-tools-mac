@@ -1,11 +1,42 @@
 #!/bin/bash
 
-# --- HELPER FUNCTIONS ---
+# --- CONFIGURATION ---
+LOG_FILE="network_report.log"
+LOGGING=false
+
+# --- ARGUMENT PARSING ---
+while getopts "l" opt; do
+  case $opt in
+    l)
+      LOGGING=true
+      echo "📝 Logging enabled. Saving to: $LOG_FILE"
+      sleep 1
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# --- LOGGING FUNCTION ---
+log_transaction() {
+    local cmd="$1"
+    local output="$2"
+    
+    if [ "$LOGGING" = true ]; then
+        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "[$timestamp] CMD: $cmd" >> "$LOG_FILE"
+        echo "RESULT: $output" >> "$LOG_FILE"
+        echo "" >> "$LOG_FILE"
+    fi
+}
 
 print_line() {
     echo "----------------------------------------"
 }
 
+# --- VALIDATION FUNCTIONS ---
 validate_ip() {
     local ip=$1
     local stat=1
@@ -39,19 +70,27 @@ check_tcp() {
     local port=$2
     
     echo -n "👉 Attempting TCP... "
-    # Uses curl for precise timing
-    result=$(echo "QUIT" | curl -so /dev/null -w "%{time_connect}" --connect-timeout 3 telnet://"$target":"$port")
+    
+    # Log string
+    local cmd_log="curl -so /dev/null -w %{time_connect} --connect-timeout 3 telnet://$target:$port"
+    
+    # FIX: Restored 'echo QUIT |' to prevent hanging on open ports
+    local result
+    result=$(echo "QUIT" | curl -so /dev/null -w "%{time_connect}" --connect-timeout 3 "telnet://$target:$port")
     local exit_code=$?
 
     if [ $exit_code -eq 0 ]; then
+        # Success Logic
         ms=$(echo "$result" | awk '{print $1 * 1000}')
         ms_formatted=$(printf "%.2f" $ms)
-        echo "✅ SUCCESS!"
-        echo "   Protocol: TCP"
-        echo "   Latency:  ${ms_formatted} ms"
+        
+        echo "✅ SUCCESS! (${ms_formatted} ms)"
+        log_transaction "$cmd_log" "Success - Latency: ${ms_formatted} ms"
         return 0
     else
+        # Failure Logic
         echo "❌ Failed."
+        log_transaction "$cmd_log" "Failed - Connection Refused or Timeout"
         return 1
     fi
 }
@@ -61,14 +100,17 @@ check_udp() {
     local port=$2
     
     echo -n "👉 Attempting UDP... "
-    # Uses nc -u -z -w 2 (2 second timeout)
+    
+    local cmd_log="nc -u -z -w 2 $target $port"
+    
+    # Run nc (Netcat) in UDP mode
     if nc -u -z -w 2 "$target" "$port" 2>&1 > /dev/null; then
         echo "✅ SUCCESS!"
-        echo "   Protocol: UDP"
-        echo "   Note: UDP is connectionless; 'Success' usually means the packet was accepted."
+        log_transaction "$cmd_log" "Success - Packet Accepted (Open)"
         return 0
     else
         echo "❌ Failed."
+        log_transaction "$cmd_log" "Failed - Unreachable or Closed"
         return 1
     fi
 }
@@ -79,6 +121,7 @@ while true; do
     echo ""
     print_line
     echo "   NETWORK DIAGNOSTIC TOOL"
+    if [ "$LOGGING" = true ]; then echo "   (Logs active)"; fi
     print_line
     echo "1. Ping Test"
     echo "2. DNS Lookup (nslookup)"
@@ -97,9 +140,14 @@ while true; do
             read -p "Enter packet count (default 3): " count
             count=${count:-3} 
             if [[ ! "$count" =~ ^[0-9]+$ ]]; then echo "❌ Error: Packet count must be a number."; continue; fi
-            echo "Running ping on $target ($count packets)..."
+            
+            cmd_log="ping -c $count $target"
+            echo "Running: $cmd_log"
             print_line
-            ping -c "$count" "$target"
+            
+            output=$(ping -c "$count" "$target" 2>&1)
+            echo "$output"
+            log_transaction "$cmd_log" "$output"
             ;;
             
         2)
@@ -110,54 +158,44 @@ while true; do
             read -p "Enter Record Type [default: A]: " rtype
             rtype=${rtype:-A}
             if [[ ! "$rtype" =~ ^[a-zA-Z]+$ ]]; then echo "❌ Error: Invalid record type."; continue; fi
-            echo "Resolving $rtype records for $target..."
+            
+            cmd_log="nslookup -type=$rtype $target"
+            echo "Running: $cmd_log"
             print_line
-            nslookup -type="$rtype" "$target"
+            
+            output=$(nslookup -type="$rtype" "$target" 2>&1)
+            echo "$output"
+            
+            clean_output=$(echo "$output" | sed '/^$/d')
+            log_transaction "$cmd_log" "$clean_output"
             ;;
             
         3)
             # --- FLEXIBLE PORT TEST ---
             read -p "Enter Host or IP: " target
             if ! validate_target "$target"; then continue; fi
-            
-            read -p "Enter Port (e.g., 53, 80, 443): " port
+            read -p "Enter Port: " port
             if [[ ! "$port" =~ ^[0-9]+$ ]]; then echo "❌ Error: Port must be a number."; continue; fi
             
-            # ASK FOR PROTOCOL
-            echo "Choose Protocol:"
-            echo "   [Enter] = Auto (Try UDP first, then TCP)"
-            echo "   [tcp]   = TCP only"
-            echo "   [udp]   = UDP only"
+            echo "Choose Protocol: [Enter]=Auto, [tcp], [udp]"
             read -p "Selection: " proto
-            
-            # Default to "both" if empty
             proto=${proto:-both}
-            # Normalize to lowercase
             proto=$(echo "$proto" | tr '[:upper:]' '[:lower:]')
 
-            echo "Testing connection to $target on port $port..."
+            echo "Testing $target:$port..."
             print_line
 
             case $proto in
-                tcp)
-                    check_tcp "$target" "$port"
-                    ;;
-                udp)
-                    check_udp "$target" "$port"
-                    ;;
+                tcp) check_tcp "$target" "$port" ;;
+                udp) check_udp "$target" "$port" ;;
                 both|auto)
-                    # 1. Try UDP first (Your request)
                     if check_udp "$target" "$port"; then
-                        # If UDP success, do nothing else
-                        : 
+                        :
                     else
-                        # If UDP failed, try TCP
                         check_tcp "$target" "$port"
                     fi
                     ;;
-                *)
-                    echo "❌ Error: Invalid protocol selection."
-                    ;;
+                *) echo "❌ Error: Invalid protocol.";;
             esac
             ;;
             
