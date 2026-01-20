@@ -189,16 +189,12 @@ while true; do
                 tcp) check_tcp "$target" "$port" ;;
                 udp) check_udp "$target" "$port" ;;
                 both|auto)
-<<<<<<< HEAD
-                    if check_udp "$target" "$port"; then :; else check_tcp "$target" "$port"; fi ;;
-=======
                     if check_udp "$target" "$port"; then
                         :
                     else
                         check_tcp "$target" "$port"
                     fi
                     ;;
->>>>>>> origin/main
                 *) echo "❌ Error: Invalid protocol.";;
             esac
             ;;
